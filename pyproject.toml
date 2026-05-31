@@ -16,6 +16,10 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "streamlit>=1.57.0",
     "supabase>=2.0.0",
+    "fastapi>=0.136.3",
+    "uvicorn>=0.46.0",
+    "twilio>=9.10.9",
+    "python-multipart>=0.0.27",
 ]
 
 [project.optional-dependencies]
