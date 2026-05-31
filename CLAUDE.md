@@ -1,6 +1,6 @@
 # CLAUDE.md — Hoteles Estelar Chat Assistant
 
-## Project Overview
+## Project Overvieww
 
 Enterprise chatbot for Hoteles Estelar S.A. that provides Q&A, executive summaries, and FAQ generation based on financial and corporate reports. Built incrementally as part of a university course on Generative AI techniques.
 
