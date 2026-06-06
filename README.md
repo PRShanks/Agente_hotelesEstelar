@@ -1,49 +1,91 @@
-# Hoteles Estelar — Análisis con LLM (Taller 1)
+# Hoteles Estelar — Agente Conversacional con IA (Taller 1)
 
-Sistema de análisis empresarial que combina **web scraping**, **procesamiento con LLM** y **generación aumentada por recuperación (RAG)** sobre datos públicos de **Hoteles Estelar S.A.** (NIT 890304099).
+Sistema completo de análisis empresarial e interacción conversacional sobre datos públicos de **Hoteles Estelar S.A.** (NIT 890304099), construido a lo largo de tres módulos progresivos.
 
-> **Stack:** Python 3.12 · uv · LangChain · Claude (Anthropic) · FAISS · Streamlit
+> **Stack:** Python 3.12 · uv · LangChain · Claude (Anthropic) · OpenAI · Supabase · pgvector · FastAPI · Twilio · Railway · Streamlit
 
 ---
 
-## 📁 Estructura del proyecto
+##  Evolución arquitectónica
+
+### Módulo 1 — Q&A con RAG local
+```
+Scraper → .md → data_loader → FAISS local → Claude → Streamlit
+```
+
+### Módulo 2 — Agente conversacional con memoria
+```
+Scraper → Supabase (pgvector) → Agente LangChain → Memoria (LangGraph) → Streamlit
+                                      ↓
+                              Tool financiera (SQLite)
+```
+
+### Módulo 3 — Producción con WhatsApp
+```
+WhatsApp → Twilio → FastAPI (Railway) → Agente LangChain (Function Calling)
+                                               ↓                ↓
+                                    RAG (Supabase)    Tool financiera (SQLite)
+                                               ↓
+                                    Claude → Respuesta → WhatsApp
+```
+
+---
+
+##  Estructura del proyecto
 
 ```
 scraper-main/
+├── api/                              # Módulo 3: API REST
+│   ├── __init__.py
+│   ├── main.py                       # FastAPI app con /chat y /whatsapp
+│   └── whatsapp.py                   # Webhook Twilio → TwiML
+├── app/
+│   └── dashboard.py                  # Interfaz Streamlit (Módulo 2)
 ├── data/
 │   ├── estelar_reportes/
 │   │   ├── HOTELES_ESTELAR_890304099.md   # datos financieros (scraper)
-│   │   └── hoteles_estelar.md              # info corporativa
-│   ├── processed/                          # texto consolidado (auto)
-│   └── vector_store/                       # índice FAISS (auto)
-├── scripts/
-│   ├── capture_analisis_individual.py
-│   └── extract_estelar_report.py
+│   │   ├── hoteles_estelar.md             # info corporativa
+│   │   └── hoteles_estelar_agente_clientes.md
+│   └── memoria.db                    # SQLite memoria conversacional
 ├── llm/
-│   ├── data_loader.py        # carga y consolida los 2 .md
-│   ├── prompts.py            # prompts de las 3 tareas
-│   ├── summarizer.py         # tarea 1: Resumen
-│   ├── faq_generator.py      # tarea 2: FAQ
-│   └── qa_chain.py           # tarea 3: Q&A con RAG
-├── app/
-│   └── dashboard.py          # interfaz Streamlit
-├── docs/
-│   ├── informe.md
-│   └── prompts_experimentacion.md
-├── .env.example
+│   ├── agent.py                      # Módulo 3: Agente con Function Calling
+│   ├── clients/
+│   │   ├── factory.py                # Factory del LLM (Claude/Ollama)
+│   │   └── memory.py                 # Memoria con LangGraph + SQLiteStore
+│   ├── core/
+│   │   ├── qa.py                     # Q&A con RAG + tool-calling
+│   │   ├── summarizer.py             # Generador de resúmenes
+│   │   └── faq_generator.py          # Generador de FAQ
+│   ├── financial/
+│   │   └── tool.py                   # Tool financiera (SQLite)
+│   ├── models.py                     # Modelos Pydantic (RespuestaQA)
+│   ├── prompts/
+│   │   └── qa.py                     # System prompt del agente
+│   └── rag/
+│       ├── embeddings.py             # Factory de embeddings (Ollama/OpenAI)
+│       ├── sanitizer.py              # Limpieza de fragmentos RAG
+│       └── vector_store.py           # Cliente Supabase pgvector
+├── scripts/
+│   ├── extract_estelar_report.py     # Scraper Power BI (Playwright)
+│   ├── extract_hotelesestelar_web.py # Scraper web oficial (BeautifulSoup)
+│   ├── ingestar_supabase.py          # Carga documentos a Supabase
+│   └── setup_supabase.sql            # SQL para crear tabla y función
+├── tests/                            # Tests del proyecto
+├── .env.example                      # Plantilla de variables de entorno
 ├── .gitignore
-├── .python-version
-├── pyproject.toml
-├── requirements.txt
-├── main.py
+├── .python-version                   # Python 3.12
+├── Makefile                          # Comandos del proyecto
+├── Procfile                          # Para Railway
+├── pyproject.toml                    # Dependencias con uv
+├── railway.toml                      # Configuración de Railway
 └── README.md
 ```
 
 ---
 
-## 🚀 Instalación
+##  Instalación
 
-Este proyecto usa **[uv](https://github.com/astral-sh/uv)** como gestor de paquetes y entornos.
+Este proyecto usa **[uv](https://github.com/astral-sh/uv)** como gestor de paquetes.
 
 ### 1. Clonar el repositorio
 ```bash
@@ -55,8 +97,6 @@ cd Taller1
 ```bash
 uv venv --python 3.12
 ```
-
-> ⚠️ Es importante usar Python 3.12. La librería `faiss-cpu` no tiene soporte aún para Python 3.13/3.14.
 
 ### 3. Activar el entorno
 ```powershell
@@ -70,88 +110,196 @@ source .venv/bin/activate
 
 ### 4. Instalar dependencias
 ```bash
-uv pip install -r requirements.txt
+uv sync
 ```
 
-### 5. Configurar la API key de Anthropic
+### 5. Configurar variables de entorno
 ```powershell
-# Windows
-copy .env.example .env
-```
-```bash
-# Mac/Linux
-cp .env.example .env
+copy .env.example .env   # Windows
+cp .env.example .env     # Mac/Linux
 ```
 
-Edita el archivo `.env` y reemplaza el valor placeholder por tu API key real:
-```
+Edita el `.env` con tus credenciales:
+```env
+# LLM
 ANTHROPIC_API_KEY=sk-ant-api03-...
-```
 
-> Consigue tu key gratis en: https://console.anthropic.com/settings/keys
+# Embeddings (openai para producción, ollama para local)
+EMBEDDING_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+
+# Supabase (base de datos vectorial)
+SUPABASE_URL=https://xxxx.supabase.co
+SUPABASE_SERVICE_KEY=sb_secret_...
+
+# Twilio (WhatsApp) - solo para Módulo 3
+TWILIO_ACCOUNT_SID=ACxx...
+TWILIO_AUTH_TOKEN=xx...
+TWILIO_WHATSAPP_NUMBER=whatsapp:+14155238886
+```
 
 ---
 
 ## ▶️ Uso
 
-### Lanzar el dashboard interactivo (recomendado)
+### Dashboard interactivo (Módulo 2)
 ```bash
-streamlit run app/dashboard.py
+make dev
+# o
+.venv/Scripts/python.exe -m streamlit run app/dashboard.py
 ```
-Se abre automáticamente en `http://localhost:8501`. El dashboard tiene 3 pestañas:
+Se abre en `http://localhost:8501`.
 
-| Pestaña | Funcionalidad |
-|---|---|
-| 📋 **Resumen** | Resumen ejecutivo del reporte financiero |
-| ❓ **FAQ** | Genera N preguntas frecuentes con respuesta |
-| 💬 **Q&A** | Conversa con el reporte usando RAG |
-
-### Ejecutar scripts individuales
+### API REST local (Módulo 3)
 ```bash
-# Generar el contexto consolidado a partir de los 2 archivos .md
-python -m llm.data_loader
+.venv/Scripts/python.exe -m uvicorn api.main:app --reload --port 8000
+```
+Documentación en `http://localhost:8000/docs`.
 
-# Probar el resumen
-python -m llm.summarizer
-
-# Probar el FAQ
-python -m llm.faq_generator
-
-# Probar el Q&A (incluye preguntas demo)
-python -m llm.qa_chain
+### Comandos del Makefile
+```bash
+make dev          # Lanzar dashboard Streamlit
+make ingest       # Cargar documentos a Supabase (primera vez)
+make reindex      # Reindexar Supabase desde cero
+make test         # Ejecutar tests
+make lint         # Verificar estilo de código
+make clean-cache  # Limpiar __pycache__
 ```
 
 ---
 
-## 🧪 Cómo funciona el RAG (Q&A)
+##  Arquitectura del agente (Módulo 3)
 
-1. Los dos archivos `.md` (financiero + corporativo) se consolidan en un solo `.txt`.
-2. El texto se divide en chunks de 400 caracteres con overlap de 80.
-3. Cada chunk se transforma en un vector con `sentence-transformers` (modelo multilingüe).
-4. Los vectores se indexan localmente con FAISS.
-5. Cuando se hace una pregunta:
-   - Se buscan los 4 chunks más similares semánticamente.
-   - Se le pasan a Claude como contexto.
-   - Claude responde **únicamente** con esa información.
-   - Si la respuesta no está, responde literal: *"No tengo esa información en los datos disponibles."*
+### Function Calling estricto con Pydantic
+
+El agente usa **Function Calling** con esquemas Pydantic que fuerzan al LLM a elegir la herramienta correcta:
+
+```python
+class BusquedaRAGInput(BaseModel):
+    pregunta: str = Field(description="Consulta en lenguaje natural")
+    top_k: int = Field(default=5, ge=1, le=10)
+```
+
+### Herramientas disponibles
+
+| Herramienta | Cuándo se usa | Fuente de datos |
+|---|---|---|
+| `busqueda_rag` | Preguntas abiertas sobre servicios, hoteles, alianzas | Supabase pgvector |
+| `query_financiero` | Preguntas sobre cifras exactas (ingresos, EBITDA, deuda) | SQLite local |
+
+### Flujo completo
+```
+Usuario (WhatsApp)
+      ↓
+Twilio → POST /whatsapp (FastAPI)
+      ↓
+Agente LangChain
+  1. Genera embedding de la pregunta (OpenAI, 1536 dims)
+  2. Decide qué herramienta usar (Function Calling)
+  3. Ejecuta la herramienta elegida
+  4. Claude genera la respuesta con el resultado
+      ↓
+TwiML → Twilio → WhatsApp
+```
 
 ---
 
-## 📚 Documentación
+## 🗄️ Base de datos vectorial (Supabase)
 
-- **Informe técnico:** [`docs/informe.md`](docs/informe.md)
-- **Prompt engineering:** [`docs/prompts_experimentacion.md`](docs/prompts_experimentacion.md)
+### Configurar Supabase
+1. Crear proyecto en https://supabase.com
+2. Ejecutar `scripts/setup_supabase.sql` en el SQL Editor
+3. Configurar `SUPABASE_URL` y `SUPABASE_SERVICE_KEY` en `.env`
+
+### Cargar documentos
+```bash
+make ingest
+```
+
+Carga **68 chunks** de 3 archivos de información corporativa:
+- `hoteles_estelar_agente_clientes.md` — 44 chunks
+- `informacion general.md` — 12 chunks
+- `inteligencia empresarial.md` — 12 chunks
+
+**Parámetros:** chunk=1000 chars, overlap=200, embeddings=1536 dims (OpenAI)
+
+> Los reportes financieros NO se cargan al vector store — son consultados por la herramienta estructurada `query_financiero` vía SQLite.
 
 ---
 
-## 🔒 Seguridad
+##  Embeddings
 
-- El archivo `.env` está en `.gitignore` y **nunca se sube a GitHub**.
-- El `vector_store/` también está ignorado — se regenera automáticamente.
-- La API key debe ser personal de cada usuario.
+| Proveedor | Modelo | Dims | Cuándo usar |
+|---|---|---|---|
+| OpenAI | text-embedding-3-small | 1536 | Producción (Railway) |
+| Ollama | nomic-embed-text | 768 | Desarrollo local |
+
+Configurar con `EMBEDDING_PROVIDER=openai` o `EMBEDDING_PROVIDER=ollama` en `.env`.
+
+>  Las dimensiones deben ser consistentes entre la tabla de Supabase y el modelo. Si cambias de proveedor, ejecuta `make reindex`.
 
 ---
 
-## 📝 Licencia
+##  Integración WhatsApp (Módulo 3)
+
+### Configuración de Twilio Sandbox
+1. Crear cuenta en https://console.twilio.com
+2. Activar sandbox: **Messaging → Try it out → Send a WhatsApp message**
+3. El usuario envía `join important-onto` al **+1 415 523 8886**
+4. Configurar webhook en Sandbox settings:
+   ```
+   https://web-production-58824.up.railway.app/whatsapp
+   ```
+
+### Deploy en Railway
+El proyecto está desplegado en:
+```
+https://web-production-58824.up.railway.app
+```
+
+Variables de entorno configuradas en Railway:
+- `ANTHROPIC_API_KEY`
+- `SUPABASE_URL` + `SUPABASE_SERVICE_KEY`
+- `EMBEDDING_PROVIDER=openai` + `OPENAI_API_KEY`
+
+---
+
+##  Módulos del proyecto
+
+### Módulo 1 — Q&A con RAG local
+- Scraping de datos financieros (Power BI / Supersociedades)
+- Consolidación de datos en archivo de texto limpio
+- RAG con FAISS local y Claude
+- Dashboard Streamlit con Resumen, FAQ y Q&A
+- Prompt engineering documentado con 3 versiones por prompt
+
+### Módulo 2 — Agente conversacional
+- Migración de FAISS a Supabase (pgvector)
+- Embeddings con nomic-embed-text (Ollama, 768 dims)
+- Memoria conversacional con LangGraph + SQLiteStore
+- Tool financiera para datos exactos (SQLite)
+- Agente enrutador con tool-calling
+- Dashboard actualizado con historial de chat
+
+### Módulo 3 — Producción
+- API REST con FastAPI (`/chat` y `/whatsapp`)
+- Function Calling estricto con esquemas Pydantic
+- Migración de embeddings a OpenAI (1536 dims)
+- Deploy en Railway (24/7)
+- Integración con WhatsApp vía Twilio Sandbox
+
+---
+
+##  Seguridad
+
+- `.env` en `.gitignore` — nunca se sube a GitHub
+- `data/memoria.db` en `.gitignore` — datos locales de sesión
+- Usar `SUPABASE_SERVICE_KEY` (secret) solo en backend, nunca en frontend
+- API keys de producción configuradas como variables de entorno en Railway
+
+---
+
+##  Licencia
 
 Proyecto académico — Taller 1, Aplicación de Técnicas Avanzadas de IA Generativa.
+**Empresa analizada:** Hoteles Estelar S.A. — Santiago de Cali, Colombia.
