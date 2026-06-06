@@ -7,12 +7,18 @@ Modulo 3: Migracion de SqliteStore a PostgresSaver para memoria
 persistente en la nube usando la base de datos PostgreSQL de Railway.
 
 Si DATABASE_URL no esta configurada, cae a SqliteStore como fallback.
+
+NOTA: Los datos de usuario (autenticacion, preferencias) siempre se
+guardan en SQLite local, independientemente del store principal.
+Esto garantiza que la autenticacion funciona con PostgresSaver.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import sqlite3
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,22 +36,21 @@ DEFAULT_HISTORY_LIMIT = 20
 _DEFAULT_DB_PATH = str(
     Path(__file__).resolve().parent.parent.parent / "data" / "memoria.db"
 )
+_USER_DATA_DB_PATH = str(
+    Path(__file__).resolve().parent.parent.parent / "data" / "user_data.db"
+)
 
 SESSIONS_NS = "sessions"
 MESSAGES_NS = "messages"
 USERS_NS = "users"
 PROFILE_NS = "profile"
-_AUTH_KEY = "auth_financiera"
 
 
 def _crear_store():
-    """Crea el store de memoria.
+    """Crea el store de memoria principal.
 
     Intenta usar PostgresSaver (Railway PostgreSQL).
     Si falla o no hay DATABASE_URL, usa SqliteStore como fallback.
-
-    Devuelve:
-        Tupla (store, tipo) donde tipo es "postgres" o "sqlite".
     """
     database_url = os.getenv("DATABASE_URL")
 
@@ -54,7 +59,6 @@ def _crear_store():
             from psycopg import Connection
             from langgraph.checkpoint.postgres import PostgresSaver
 
-            # autocommit=True necesario para CREATE INDEX CONCURRENTLY
             conn = Connection.connect(database_url, autocommit=True)
             saver = PostgresSaver(conn)
             saver.setup()
@@ -67,7 +71,6 @@ def _crear_store():
             )
 
     # Fallback: SqliteStore
-    import sqlite3
     from langgraph.store.sqlite import SqliteStore
 
     path = _DEFAULT_DB_PATH
@@ -80,21 +83,42 @@ def _crear_store():
     return store, "sqlite"
 
 
+def _crear_user_data_db() -> sqlite3.Connection:
+    """Crea la base de datos SQLite para datos de usuario.
+
+    Siempre usa SQLite local para datos de autenticacion y preferencias,
+    independientemente del store principal (PostgresSaver o SqliteStore).
+    """
+    Path(_USER_DATA_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(_USER_DATA_DB_PATH, check_same_thread=False)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_data (
+            user_id TEXT NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            PRIMARY KEY (user_id, key)
+        )
+    """)
+    conn.commit()
+    return conn
+
+
 class SessionMemory:
     """Gestiona la memoria de conversacion con PostgresSaver o SqliteStore.
 
-    PostgresSaver (LangGraph) para memoria persistente en Railway PostgreSQL.
-    SqliteStore como fallback si DATABASE_URL no esta configurada.
+    Store principal: PostgresSaver (Railway PostgreSQL) o SqliteStore.
+    Datos de usuario: SQLite local siempre (autenticacion, preferencias).
     """
 
     def __init__(self) -> None:
         """Inicializa el store segun la configuracion disponible."""
         self._store, self._tipo = _crear_store()
+        self._user_db = _crear_user_data_db()
         logger.info("SessionMemory inicializada con %s", self._tipo)
 
     @property
     def tipo(self) -> str:
-        """Tipo de store: 'postgres' o 'sqlite'."""
+        """Tipo de store principal: 'postgres' o 'sqlite'."""
         return self._tipo
 
     def save_message(self, session_id: str, role: str, content: str) -> None:
@@ -152,22 +176,37 @@ class SessionMemory:
             return len(items) > 0
         return False
 
+    # -----------------------------------------------------------------------
+    # Datos de usuario — siempre SQLite local (funciona con PostgresSaver)
+    # -----------------------------------------------------------------------
+
     def save_user_data(self, user_id: str, key: str, value: dict) -> None:
-        """Guarda datos del usuario (autenticacion, preferencias)."""
-        if self._tipo == "sqlite":
-            namespace = (USERS_NS, user_id, PROFILE_NS)
-            self._store.put(namespace, key, value)
+        """Guarda datos del usuario en SQLite local.
+
+        Funciona independientemente del store principal.
+        Usado para autenticacion financiera y preferencias.
+        """
+        self._user_db.execute(
+            "INSERT OR REPLACE INTO user_data (user_id, key, value) VALUES (?, ?, ?)",
+            (user_id, key, json.dumps(value)),
+        )
+        self._user_db.commit()
 
     def get_user_data(self, user_id: str, key: str) -> dict | None:
-        """Recupera datos del usuario."""
-        if self._tipo == "sqlite":
-            namespace = (USERS_NS, user_id, PROFILE_NS)
-            item = self._store.get(namespace, key)
-            return item.value if item else None
+        """Recupera datos del usuario desde SQLite local."""
+        cursor = self._user_db.execute(
+            "SELECT value FROM user_data WHERE user_id = ? AND key = ?",
+            (user_id, key),
+        )
+        row = cursor.fetchone()
+        if row:
+            return json.loads(row[0])
         return None
 
     def delete_user_data(self, user_id: str, key: str) -> None:
-        """Elimina datos del usuario."""
-        if self._tipo == "sqlite":
-            namespace = (USERS_NS, user_id, PROFILE_NS)
-            self._store.delete(namespace, key)
+        """Elimina datos del usuario desde SQLite local."""
+        self._user_db.execute(
+            "DELETE FROM user_data WHERE user_id = ? AND key = ?",
+            (user_id, key),
+        )
+        self._user_db.commit()
