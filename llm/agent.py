@@ -201,7 +201,11 @@ def responder(pregunta: str, session_id: str = "default") -> dict:
         texto_respuesta = ""
 
         for msg in reversed(mensajes_resultado):
-            if hasattr(msg, "content") and msg.content and not hasattr(msg, "tool_calls"):
+            # Tomar el ultimo AIMessage con contenido y sin tool_calls activos
+            tool_calls = getattr(msg, "tool_calls", None)
+            tiene_tool_calls = bool(tool_calls)
+            msg_type = getattr(msg, "type", "")
+            if hasattr(msg, "content") and msg.content and not tiene_tool_calls and msg_type == "ai":
                 texto_respuesta = msg.content
                 break
 
