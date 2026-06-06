@@ -4,29 +4,32 @@
 Agente conversacional de Hoteles Estelar con Function Calling estricto.
 
 Arquitectura (Módulo 3):
+  - init_chat_model: inicializa el LLM según el proveedor configurado.
+  - create_react_agent: orquesta el agente con herramientas (ReAct loop).
   - Function Calling con esquemas Pydantic estrictos (no texto libre).
   - Memoria persistente por session_id usando SqliteStore de LangGraph.
   - Dos herramientas: RAG (Supabase) y consulta financiera (SQLite).
   - Manejo de errores gracioso: si una tool falla, responde sin ella.
 
 Diferencia con Módulo 2:
-  - Módulo 2: el LLM decidía qué herramienta usar con texto libre.
-  - Módulo 3: el LLM DEBE invocar una herramienta con un JSON Schema
-    estricto validado por Pydantic — más fiable y predecible.
+  - Módulo 2: el LLM decidía qué herramienta usar con texto libre (bind_tools manual).
+  - Módulo 3: create_react_agent orquesta el loop completo de forma estandarizada.
+    El LLM DEBE invocar una herramienta con un JSON Schema estricto validado
+    por Pydantic, aumentando drásticamente la fiabilidad.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from typing import Annotated
 
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain.chat_models import init_chat_model
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
+from langgraph.prebuilt import create_react_agent
 from pydantic import BaseModel, Field
 
-from llm.clients.factory import crear_llm
 from llm.clients.memory import SessionMemory
 from llm.financial.tool import query_financiero
 from llm.prompts.qa import cargar_system_prompt
@@ -57,14 +60,14 @@ class BusquedaRAGInput(BaseModel):
     """Esquema estricto de entrada para la herramienta de búsqueda RAG.
 
     El LLM DEBE proporcionar estos campos exactos — no puede improvisar
-    parámetros fuera del esquema.
+    parámetros fuera del esquema. Esto es Function Calling estricto con Pydantic.
     """
 
     pregunta: str = Field(
         description=(
             "La pregunta o consulta del usuario en lenguaje natural. "
             "Debe ser específica y clara para obtener los mejores resultados "
-            "de la búsqueda semántica."
+            "de la búsqueda semántica en Supabase."
         )
     )
     top_k: int = Field(
@@ -114,7 +117,10 @@ def busqueda_rag(pregunta: str, top_k: int = 5) -> str:
 
     except Exception as e:
         logger.exception("Error en busqueda_rag")
-        return f"Error al buscar en la base de datos: {e}"
+        return (
+            f"En este momento no pude acceder a la base de datos corporativa. "
+            f"Intentaré responder con la información disponible. Error: {e}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -134,18 +140,19 @@ class AgentError(Exception):
 # Función principal del agente
 # ---------------------------------------------------------------------------
 def responder(pregunta: str, session_id: str = "default") -> dict:
-    """Responde una pregunta usando el agente con Function Calling estricto.
+    """Responde una pregunta usando create_react_agent con Function Calling estricto.
 
     Flujo:
-    1. Cargar historial de la sesión (memoria persistente).
-    2. Invocar el LLM con las herramientas disponibles (Function Calling).
-    3. Si el LLM invoca una herramienta, ejecutarla y hacer segundo invoke.
-    4. Guardar la pregunta y respuesta en memoria.
-    5. Devolver la respuesta estructurada.
+    1. Inicializar el LLM con init_chat_model (estandar LangChain).
+    2. Crear el agente con create_react_agent (ReAct loop automatico).
+    3. Cargar historial de la sesion (memoria persistente).
+    4. Invocar el agente — el decide cuantas tools usar y en que orden.
+    5. Guardar la pregunta y respuesta en memoria.
+    6. Devolver la respuesta estructurada.
 
-    Parámetros:
+    Parametros:
         pregunta: Consulta del usuario en lenguaje natural.
-        session_id: Identificador de sesión (número de WhatsApp o ID custom).
+        session_id: Identificador de sesion (numero de WhatsApp o ID custom).
 
     Devuelve:
         Dict con claves: respuesta, confianza, uso_tool_financiera, fuentes.
@@ -156,70 +163,59 @@ def responder(pregunta: str, session_id: str = "default") -> dict:
     memoria = _get_memoria()
     historial = memoria.get_history(session_id)
 
-    # Crear el LLM con las herramientas enlazadas (Function Calling)
-    llm = crear_llm(temperature=0.0, max_tokens=1024)
-    llm_con_tools = llm.bind_tools(HERRAMIENTAS)
+    # --- init_chat_model: inicializa el LLM de forma estandarizada ---
+    # Lee el proveedor del entorno: "anthropic" por defecto en produccion
+    proveedor = os.getenv("LLM_PROVIDER", "anthropic")
+    modelo = os.getenv("LLM_MODEL", "claude-haiku-4-5-20251001")
 
+    llm = init_chat_model(
+        model=modelo,
+        model_provider=proveedor,
+        temperature=0.0,
+        max_tokens=1024,
+    )
+
+    # --- create_react_agent: crea el agente con el loop ReAct automatico ---
+    # ReAct = Reasoning + Acting: el agente razona, actua con tools, y repite
+    # hasta tener suficiente informacion para responder.
     system_prompt = cargar_system_prompt()
 
-    # Construir los mensajes
-    mensajes: list = [("system", system_prompt)]
-    mensajes.extend(historial)
-    mensajes.append(("human", pregunta))
+    agente = create_react_agent(
+        model=llm,
+        tools=HERRAMIENTAS,
+        prompt=system_prompt,
+    )
+
+    # Construir los mensajes con historial
+    mensajes = list(historial) + [HumanMessage(content=pregunta)]
 
     uso_tool_financiera = False
     tool_usada = None
 
     try:
-        # --- Primer invoke: el LLM decide si usar herramienta ---
-        respuesta_inicial = llm_con_tools.invoke(mensajes)
+        # Invocar el agente — create_react_agent maneja el loop completo
+        resultado = agente.invoke({"messages": mensajes})
 
-        if respuesta_inicial.tool_calls:
-            tool_call = respuesta_inicial.tool_calls[0]
-            tool_name = tool_call["name"]
-            tool_args = tool_call["args"]
+        # Extraer la respuesta final (ultimo mensaje del agente)
+        mensajes_resultado = resultado.get("messages", [])
+        texto_respuesta = ""
 
-            logger.info(
-                "Tool invocada | session=%s | tool=%s | args=%s",
-                session_id, tool_name, tool_args,
-            )
+        for msg in reversed(mensajes_resultado):
+            if hasattr(msg, "content") and msg.content and not hasattr(msg, "tool_calls"):
+                texto_respuesta = msg.content
+                break
 
-            # Ejecutar la herramienta correcta
-            try:
-                if tool_name == "busqueda_rag":
-                    resultado_tool = busqueda_rag.invoke(tool_args)
-                    tool_usada = "RAG"
-                elif tool_name == "query_financiero":
-                    resultado_tool = query_financiero.invoke(tool_args)
-                    tool_usada = "financiera"
+        if not texto_respuesta:
+            texto_respuesta = "No pude generar una respuesta en este momento."
+
+        # Detectar si se uso la tool financiera
+        for msg in mensajes_resultado:
+            if hasattr(msg, "name"):
+                if msg.name == "query_financiero":
                     uso_tool_financiera = True
-                else:
-                    resultado_tool = f"Herramienta '{tool_name}' no reconocida."
-                    tool_usada = "desconocida"
-            except Exception as e:
-                logger.warning("Tool %s falló: %s", tool_name, e)
-                resultado_tool = (
-                    f"En este momento no pude obtener la información solicitada "
-                    f"({tool_name} falló). Intentaré responder con lo que sé."
-                )
-
-            # --- Segundo invoke: el LLM genera la respuesta final con el resultado ---
-            mensajes_con_tool = [
-                *mensajes,
-                respuesta_inicial,
-                ToolMessage(
-                    content=resultado_tool,
-                    tool_call_id=tool_call["id"],
-                ),
-            ]
-
-            respuesta_final = llm.invoke(mensajes_con_tool)
-            texto_respuesta = respuesta_final.content
-
-        else:
-            # El LLM respondió directamente sin usar herramienta
-            texto_respuesta = respuesta_inicial.content
-            tool_usada = None
+                    tool_usada = "financiera"
+                elif msg.name == "busqueda_rag":
+                    tool_usada = "RAG"
 
     except Exception as e:
         logger.exception("Error en el agente | session=%s", session_id)
